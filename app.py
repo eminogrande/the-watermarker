@@ -1,33 +1,37 @@
 import streamlit as st
 import torch
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    LogitsProcessorList
-)
-# The watermark processor and detector have been moved to a separate library
-# We will install it and import from there.
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
 from watermark_processor import WatermarkLogitsProcessor, WatermarkDetector
 
 # --- Model and Tokenizer Loading ---
 @st.cache_resource
-def load_model_and_tokenizer(model_name="gpt2"):
-    """Loads and caches a model and tokenizer from Hugging Face."""
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+def load_model():
+    """Loads and caches a GPT-2 model and tokenizer from Hugging Face."""
+    model = GPT2LMHeadModel.from_pretrained("gpt2")
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
     return model, tokenizer
+
+def get_vocab(tokenizer):
+    """Pulls the vocabulary from the loaded tokenizer."""
+    vocab = [tokenizer.decode([i]) for i in range(tokenizer.vocab_size)]
+    return vocab
 
 # --- Core Application Logic ---
 st.set_page_config(layout="wide", page_title="Real LLM Watermarker")
-st.title("Real Probabilistic Watermarking Tool")
-st.info("This application uses a real LLM (`gpt2`) running locally to demonstrate verifiable watermarking.")
+st.title("Real Probabilistic Watermarking Tool (GPT-2 Edition)")
 
-# --- Load the Model --- 
-with st.spinner("Loading local LLM (`gpt2`). This may take a moment on first run..."):
-    model, tokenizer = load_model_and_tokenizer()
-st.success("Model `gpt2` is loaded and ready!")
+# --- Load the Model ---
+with st.spinner("Loading GPT-2 model..."):
+    model, tokenizer = load_model()
+    # Set a padding token if it's not already set
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        model.config.pad_token_id = model.config.eos_token_id
+
+st.success("Model loaded and ready!")
+
+# Extract vocabulary for the watermarker
+model_vocab = get_vocab(tokenizer)
 
 col1, col2 = st.columns(2)
 
@@ -45,40 +49,51 @@ with col1:
             st.warning("Please provide text and a secret key.")
         else:
             with st.spinner("Generating text and embedding your watermark..."):
-                # This is the correct initialization
-                watermark_processor = WatermarkLogitsProcessor(vocab=list(tokenizer.get_vocab().values()),
+                watermark_processor = WatermarkLogitsProcessor(vocab=model_vocab,
                                                              gamma=0.25,
                                                              delta=2.0,
                                                              seeding_scheme="simple_1",
                                                              hash_key=hash(secret_key))
-
-                inputs = tokenizer(text_to_paraphrase, return_tensors="pt", add_special_tokens=False)
                 
+                prompt = f"Paraphrase the following text: {text_to_paraphrase}\n\nParaphrased text:"
+                inputs = tokenizer(prompt, return_tensors="pt")
+                
+                # Generate text using the model and the watermark processor
                 output = model.generate(
                     **inputs,
-                    logits_processor=LogitsProcessorList([watermark_processor]),
-                    max_new_tokens=200,
+                    max_new_tokens=int(len(text_to_paraphrase.split()) * 1.5),
+                    logits_processor=[watermark_processor],
+                    temperature=0.7,
+                    top_k=50,
+                    no_repeat_ngram_size=2,
                     pad_token_id=tokenizer.pad_token_id
                 )
                 
-                watermarked_text = tokenizer.batch_decode(output, skip_special_tokens=True)[0]
+                # Decode the output, skipping special tokens
+                watermarked_text = tokenizer.decode(output[0], skip_special_tokens=True)
+                # Clean up the output to only show the paraphrased part
+                watermarked_text = watermarked_text.split("Paraphrased text:")[1].strip()
+
                 st.session_state['generated_text'] = watermarked_text
 
     if 'generated_text' in st.session_state:
         st.subheader("Your Paraphrased and Watermarked Text:")
         st.text_area("Output Text", st.session_state.generated_text, height=200)
 
+
 with col2:
     st.header("2. Detect Watermark")
     key_to_check = st.text_input("Secret Key to Check For", value="correct horse battery staple")
-    text_to_check = st.text_area("Paste text here to verify...", "", height=150)
+    text_to_check_default = st.session_state.get('generated_text', '')
+    text_to_check = st.text_area("Paste text here to verify...", text_to_check_default, height=150)
 
     if st.button("Detect Watermark"):
         if not text_to_check or not key_to_check:
             st.warning("Please provide text and a key.")
         else:
             with st.spinner("Analyzing text..."):
-                detector = WatermarkDetector(vocab=list(tokenizer.get_vocab().values()),
+                # The detector needs the original tokenizer
+                detector = WatermarkDetector(vocab=model_vocab,
                                            gamma=0.25,
                                            seeding_scheme="simple_1",
                                            device=model.device,
@@ -91,12 +106,12 @@ with col2:
                 if output_dict.get("errors"):
                     st.error(f"An error occurred: {output_dict['errors'][0]}")
                 else:
-                    z_score = output_dict['z_score']
-                    num_tokens = output_dict['num_tokens_scored']
+                    z_score = output_dict.get('z_score', 0)
+                    num_tokens = output_dict.get('num_tokens_scored', 0)
                     st.metric(label="Z-Score (Threshold is ~4.0)", value=f"{z_score:.4f}")
                     st.write(f"Analyzed {num_tokens} tokens.")
 
-                    if output_dict['prediction']:
+                    if output_dict.get('prediction'):
                         st.success("**VERDICT: WATERMARK DETECTED!**")
                     else:
                         st.error("**VERDICT: WATERMARK NOT DETECTED.**")

@@ -79,7 +79,6 @@ class WatermarkLogitsProcessor(WatermarkBase, LogitsProcessor):
         return scores
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-
         # this is lazy to allow us to colocate on the watermarked model's device
         if self.rng is None:
             self.rng = torch.Generator(device=input_ids.device)
