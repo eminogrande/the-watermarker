@@ -57,7 +57,7 @@ with col1:
                 output = model.generate(
                     **inputs,
                     logits_processor=LogitsProcessorList([watermark_processor]),
-                    max_length=150,
+                    max_new_tokens=200,
                     pad_token_id=tokenizer.pad_token_id
                 )
                 
